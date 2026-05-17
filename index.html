@@ -416,7 +416,7 @@
       </div>
       <div class="form-group">
         <label>WhatsApp para contato</label>
-        <input type="tel" name="whatsapp" placeholder="(11) 99999-9999" required />
+        <input type="tel" name="whatsapp" placeholder="(11) 9 9999-9999" required />
       </div>
 
       <div class="form-group">
@@ -581,24 +581,24 @@
     if (counter) counter.textContent = `${blocks.length} de ${MAX_CHILDREN}`;
   }
 
-  // ── SUBMIT: Google Sheets via Apps Script ──
+  // ── SUBMIT: Google Sheets via Apps Script (iframe POST — bulletproof) ──
   async function submitForm(e) {
     e.preventDefault();
     const form = document.getElementById('rsvp-form');
     const data = new FormData(form);
     const btn = document.querySelector('.form-submit');
 
-    const responsavel = data.get('responsavel');
-    const whatsapp = data.get('whatsapp');
-    const observacoes = data.get('observacoes') || '';
+    const responsavel = data.get('responsavel')?.trim();
+    const whatsapp = data.get('whatsapp')?.trim();
+    const observacoes = data.get('observacoes')?.trim() || '';
     const timestamp = new Date().toLocaleString('pt-BR');
 
     // Collect children
     const children = [];
     document.querySelectorAll('.child-block').forEach(block => {
       const inputs = block.querySelectorAll('input, select');
-      const nome = inputs[0]?.value || '';
-      const idade = inputs[1]?.value || '';
+      const nome = inputs[0]?.value?.trim() || '';
+      const idade = inputs[1]?.value?.trim() || '';
       const restricao = inputs[2]?.value || 'Nenhuma';
       if (nome) children.push({ nome, idade, restricao });
     });
@@ -613,36 +613,86 @@
 
     if (GAS_URL) {
       try {
-        // Send one row per child
-        for (const child of children) {
-          const params = new URLSearchParams({
-            action: 'write',
-            timestamp: timestamp,
-            responsavel: responsavel,
-            whatsapp: whatsapp,
-            crianca: child.nome,
-            idade: child.idade,
-            restricao: child.restricao,
-            observacoes: observacoes
-          });
-          await fetch(`${GAS_URL}?${params.toString()}`, { method: 'GET', mode: 'no-cors' });
-        }
-        // no-cors doesn't return readable response, trust execution
-        await new Promise(r => setTimeout(r, 1500));
+        // Send one request per child using hidden iframe (avoids all CORS issues)
+        const sends = children.map(child => sendViaIframe({
+          action: 'write',
+          timestamp, responsavel, whatsapp,
+          crianca: child.nome,
+          idade: child.idade,
+          restricao: child.restricao,
+          observacoes
+        }));
+        await Promise.all(sends);
+        // Wait a bit for GAS to process
+        await new Promise(r => setTimeout(r, 2000));
         showSuccess();
       } catch (err) {
         console.error('Erro ao enviar:', err);
-        alert('Houve um problema ao enviar. Tente novamente ou confirme pelo WhatsApp.');
-        btn.disabled = false;
-        btn.textContent = 'Confirmar presença 🌺';
+        // Even on error, try the GET fallback
+        try {
+          for (const child of children) {
+            const params = new URLSearchParams({
+              action: 'write', timestamp, responsavel, whatsapp,
+              crianca: child.nome, idade: child.idade,
+              restricao: child.restricao, observacoes
+            });
+            await fetch(`${GAS_URL}?${params.toString()}`, { method: 'GET', mode: 'no-cors' });
+          }
+          await new Promise(r => setTimeout(r, 1500));
+          showSuccess();
+        } catch (err2) {
+          alert('Houve um problema ao enviar. Tente novamente ou confirme pelo WhatsApp.');
+          btn.disabled = false;
+          btn.textContent = 'Confirmar presença 🌺';
+        }
       }
     } else {
-      // No GAS_URL configured — show success anyway (for preview/dev)
       console.warn('GAS_URL não configurada. Simulando envio...');
       console.table(children.map(c => ({ timestamp, responsavel, whatsapp, ...c, observacoes })));
       await new Promise(r => setTimeout(r, 800));
       showSuccess();
     }
+  }
+
+  // Hidden iframe POST — most reliable way to hit Apps Script without CORS
+  function sendViaIframe(params) {
+    return new Promise((resolve) => {
+      const id = 'gas_frame_' + Math.random().toString(36).slice(2);
+      const iframe = document.createElement('iframe');
+      iframe.name = id;
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = GAS_URL;
+      form.target = id;
+      form.style.display = 'none';
+
+      Object.entries(params).forEach(([key, val]) => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = val || '';
+        form.appendChild(input);
+      });
+
+      document.body.appendChild(form);
+
+      iframe.onload = () => {
+        // Cleanup after a delay
+        setTimeout(() => {
+          iframe.remove();
+          form.remove();
+        }, 1000);
+        resolve();
+      };
+
+      // Timeout fallback
+      setTimeout(resolve, 5000);
+
+      form.submit();
+    });
   }
 
   function showSuccess() {
@@ -651,6 +701,28 @@
     s.classList.add('show');
     s.scrollIntoView({ behavior: 'smooth' });
   }
+  // ── PHONE MASK (99) 9 9999-9999 ──
+  function phoneMask(input) {
+    let v = input.value.replace(/\D/g, '').slice(0, 11);
+    if (v.length > 6) {
+      v = '(' + v.slice(0,2) + ') ' + v.slice(2,3) + ' ' + v.slice(3,7) + '-' + v.slice(7);
+    } else if (v.length > 2) {
+      v = '(' + v.slice(0,2) + ') ' + v.slice(2);
+    } else if (v.length > 0) {
+      v = '(' + v;
+    }
+    input.value = v;
+  }
+
+  // Attach mask on load
+  document.addEventListener('DOMContentLoaded', () => {
+    const whatsInput = document.querySelector('input[name="whatsapp"]');
+    if (whatsInput) {
+      whatsInput.addEventListener('input', function() { phoneMask(this); });
+      whatsInput.setAttribute('inputmode', 'numeric');
+      whatsInput.setAttribute('maxlength', '17');
+    }
+  });
 </script>
 </body>
 </html>
